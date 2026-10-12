@@ -23,17 +23,62 @@ ai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
+# Словники для збереження контексту та груп
 user_history = {}
+user_groups = {} 
+
+def fetch_group_id_from_site(group_name: str):
+    """
+    Робить запит до прихованого API сайту ПНУ для пошуку внутрішнього ID групи.
+    """
+    # urllib.parse.quote кодує кирилицю (наприклад "ІПЗ-42") для URL-посилання
+    query = urllib.parse.quote(group_name)
+    # Стандартний ендпоінт АСУ для пошуку груп (autocomplete)
+    search_url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&lev=142&faculty=0&query={query}"
+    
+    try:
+        response = requests.get(search_url, timeout=5, verify=False)
+        response.encoding = 'windows-1251'
+        
+        # Сайт повертає дані у форматі JSON: {"query":"ІПЗ-42", "suggestions":["ІПЗ-42"], "data":["-5633"]}
+        data = response.json()
+        
+        if "suggestions" in data and "data" in data:
+            suggestions = data["suggestions"]
+            ids = data["data"]
+            
+            # Шукаємо точний збіг (ігноруючи регістр і пробіли)
+            for i, suggestion in enumerate(suggestions):
+                if suggestion.lower().replace(" ", "") == group_name.lower().replace(" ", ""):
+                    return ids[i]
+            
+            # Якщо точного збігу немає, але щось знайшло (наприклад, ввели "ІПЗ", а знайшло "ІПЗ-41"), беремо перше
+            if ids:
+                return ids[0]
+                
+    except Exception as e:
+        print(f"Помилка динамічного пошуку групи: {e}")
+        
+    return None
 
 def fetch_schedule_from_site(group_name: str) -> str:
-    group_ids = {
-        "іпз-42": "-5633",
-        "іпз-41": "-5632", 
-    }
+    # 1. ДИНАМІЧНИЙ ПОШУК ID ГРУПИ
+    system_group_id = fetch_group_id_from_site(group_name)
     
-    search_key = group_name.lower().replace(" ", "")
-    system_group_id = group_ids.get(search_key, group_name)
+    # Якщо сайт не відповів, перевіряємо наш запасний словник
+    if not system_group_id:
+        group_ids = {
+            "іпз-42": "-5633",
+            "іпз-41": "-5632", 
+        }
+        search_key = group_name.lower().replace(" ", "")
+        system_group_id = group_ids.get(search_key)
+        
+        # Якщо групи взагалі не існує
+        if not system_group_id:
+            return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ. Перевірте правильність назви (наприклад: ІПЗ-42)."
     
+    # 2. ФОРМУВАННЯ ЗАПИТУ НА РОЗКЛАД
     today = datetime.datetime.now()
     end_date = today + datetime.timedelta(days=14)
     sdate_str = today.strftime("%d.%m.%Y")
@@ -101,19 +146,25 @@ def fetch_schedule_from_site(group_name: str) -> str:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника. Напиши мені своє запитання, наприклад: 'Який у мене розклад на понеділок?'")
+    await message.answer("Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника.\n\nЩоб я міг показувати ваш розклад, напишіть мені свою групу, наприклад:\n**Група ІПЗ-42**\n\n*(Я підтримую будь-які групи та факультети!)*", parse_mode="Markdown")
 
 @dp.message()
 async def ai_handler(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text.lower()
     
+    if user_text.startswith("група "):
+        group_name = message.text[6:].strip().upper() 
+        user_groups[user_id] = group_name
+        await message.answer(f"✅ Супер! Я запам'ятав вашу групу: **{group_name}**.\nТепер можете запитати: «Який розклад на завтра?»", parse_mode="Markdown")
+        return 
+    
     if user_id not in user_history:
         user_history[user_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ти ввічливий куратор ПНУ ім. В. Стефаника. "
+                    "Ти дружній віртуальний куратор ПНУ ім. В. Стефаника. "
                     "Твоя головна умова: завжди відповідай ВИКЛЮЧНО українською мовою. "
                     "ВАЖЛИВО: НІКОЛИ не використовуй Markdown-таблиці (з символами |). "
                     "Форматуй розклад у вигляді красивого списку з емодзі. "
@@ -128,12 +179,19 @@ async def ai_handler(message: types.Message):
     wait_msg = await message.answer("Шукаю інформацію...")
 
     if "розклад" in user_text or "пари" in user_text or "пара" in user_text:
-        real_schedule = fetch_schedule_from_site("ІПЗ-42")
-        
-        user_history[user_id].append({
-            "role": "system", 
-            "content": f"Ось актуальні дані про розклад: {real_schedule}. Використай їх для точної відповіді студенту."
-        })
+        if user_id in user_groups:
+            group = user_groups[user_id]
+            real_schedule = fetch_schedule_from_site(group)
+            
+            user_history[user_id].append({
+                "role": "system", 
+                "content": f"Ось актуальні дані про розклад для групи {group}:\n{real_schedule}\nВикористай їх для точної відповіді студенту. Якщо там написано 'Не вдалося знайти групу', передай це студенту дослівно."
+            })
+        else:
+            user_history[user_id].append({
+                "role": "system", 
+                "content": "Студент хоче дізнатися розклад, але система ще не знає його групи. Ввічливо попроси його спочатку написати свою групу у форматі 'Група ІПЗ-42'."
+            })
 
     user_history[user_id].append({"role": "user", "content": message.text})
     
@@ -147,9 +205,7 @@ async def ai_handler(message: types.Message):
         )
         
         ai_text = response.choices[0].message.content
-        
         user_history[user_id].append({"role": "assistant", "content": ai_text})
-        
         await wait_msg.edit_text(ai_text)
         
     except Exception as e:
