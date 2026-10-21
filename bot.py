@@ -1,5 +1,5 @@
 import os
-import urllib.parse
+import json
 import asyncio
 import datetime
 import requests
@@ -10,7 +10,6 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from openai import AsyncOpenAI
-from duckduckgo_search import DDGS
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -28,89 +27,55 @@ ai_client = AsyncOpenAI(
 user_history = {}
 user_groups = {}
 
+PNU_KNOWLEDGE_BASE = """
+Ти — офіційний віртуальний куратор Прикарпатського національного університету імені Василя Стефаника (ПНУ).
+Твоє завдання: надавати правдиву інформацію про університет.
+Головні факти про ПНУ:
+1. Офіційна назва: Прикарпатський національний університет імені Василя Стефаника (ПНУ).
+2. Ректор університету: Цепенда Ігор Євгенович.
+3. Офіційний сайт: https://pnu.edu.ua/
+4. Сайт розкладу: https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi
+5. Університет знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
+6. Факультети: математики та інформатики, фізико-технічний, економічний, філології, туризму, іноземних мов, педагогічний, юридичний інститут тощо.
+Відповідай коротко і без вигадок.
+"""
+
+def load_groups_db() -> dict:
+    try:
+        with open("groups.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 def fix_cyrillic_letters(text: str) -> str:
     eng_chars = "ABCEHKMOPTXIXabcehkmoptxix"
     ukr_chars = "АВСЕНКМОРТХІХавсенкмортхіх"
     trans_table = str.maketrans(eng_chars, ukr_chars)
     return text.translate(trans_table)
 
-def search_web(query: str) -> str:
-    try:
-        search_query = f"{query} Карпатський національний університет імені Василя Стефаника"
-        with DDGS() as ddgs:
-            results = list(ddgs.text(search_query, region='ua-uk', max_results=3))
-            if not results:
-                return "В інтернеті не знайдено інформації за цим запитом."
-            context = "Знайдено в інтернеті:\n\n"
-            for r in results:
-                context += f"Джерело: {r['title']}\nТекст: {r['body'][:500]}\n\n"
-            return context
-    except Exception as e:
-        return f"Помилка вебпошуку: {e}"
-
-def fetch_group_id_from_site(group_name: str):
-    clean_group = fix_cyrillic_letters(group_name.strip().upper())
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
-    }
-    
-    query = urllib.parse.quote(clean_group.encode('windows-1251'))
-    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&lev=142&query={query}"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=5, verify=False)
-        response.encoding = 'windows-1251'
-        data = response.json()
-        if "suggestions" in data and "data" in data:
-            for i, suggestion in enumerate(data["suggestions"]):
-                if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
-                    return data["data"][i]
-            for i, suggestion in enumerate(data["suggestions"]):
-                if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
-                    return data["data"][i]
-            if data["data"]:
-                return data["data"][0]
-    except Exception:
-        pass
-    return None
-
 def fetch_schedule_from_site(group_name: str) -> str:
     clean_group = fix_cyrillic_letters(group_name.strip().upper())
-    system_group_id = fetch_group_id_from_site(clean_group)
+    groups_db = load_groups_db()
+    system_group_id = groups_db.get(clean_group)
     
     if not system_group_id:
-        return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ."
+        return f"❌ Групу '{group_name}' не знайдено в моїй базі."
     
     today = datetime.datetime.now()
     end_date = today + datetime.timedelta(days=14)
     sdate_str = today.strftime("%d.%m.%Y")
     edate_str = end_date.strftime("%d.%m.%Y")
     
-    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
+    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
-    payload = {
-        "faculty": "0",
-        "course": "0",
-        "group": system_group_id,
-        "sdate": sdate_str,
-        "edate": edate_str,
-        "n": "700"
-    }
-
     time_schedule = {
         "1": "09:00 - 10:20", "2": "10:35 - 11:55", "3": "12:20 - 13:40", "4": "13:50 - 15:10",
         "5": "15:20 - 16:40", "6": "16:50 - 18:10", "7": "18:15 - 19:35", "8": "19:40 - 21:00"
     }
     
     try:
-        response = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
         response.encoding = 'windows-1251'
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
@@ -137,11 +102,11 @@ def fetch_schedule_from_site(group_name: str) -> str:
                     schedule_text += f"Пара {para_num} [{para_time}]: {content_text}{link_info}\n"
         return schedule_text[:3500] 
     except Exception as e:
-        return f"❌ Помилка доступу до бази ПНУ: {e}"
+        return f"❌ Помилка доступу до сайту ПНУ: {e}"
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привіт! Я розумний помічник Карпатського національного університету імені Василя Стефаника. Напишіть свою групу для розкладу або задайте будь-яке питання про університет, і я пошукаю це в інтернеті!")
+    await message.answer("Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника.\nНапишіть свою групу (наприклад, ІПЗ-42) для отримання розкладу або задайте питання про університет.")
 
 @dp.message()
 async def ai_handler(message: types.Message):
@@ -153,11 +118,11 @@ async def ai_handler(message: types.Message):
         group_name = fix_cyrillic_letters(match.group(1).upper())
         user_groups[user_id] = group_name
         if "розклад" not in user_text and "пар" not in user_text:
-            await message.answer(f"✅ Групу **{group_name}** збережено. Запитай: «Який розклад на завтра?»", parse_mode="Markdown")
+            await message.answer(f"✅ Групу **{group_name}** збережено. Тепер можете запитати: «Який розклад?»", parse_mode="Markdown")
             return
     
     if user_id not in user_history:
-        user_history[user_id] = [{"role": "system", "content": "Ти помічник Карпатського національного університету імені Василя Стефаника (ПНУ). Відповідай правдиво українською."}]
+        user_history[user_id] = [{"role": "system", "content": PNU_KNOWLEDGE_BASE}]
         
     wait_msg = await message.answer("Шукаю інформацію...")
 
@@ -170,10 +135,9 @@ async def ai_handler(message: types.Message):
                 return
             context = f"Ось розклад для {group}:\n{real_schedule}"
         else:
-            context = "Попроси студента спочатку вказати групу."
+            context = "Попроси студента спочатку вказати назву своєї групи (наприклад, ІПЗ-42)."
     else:
-        web_data = search_web(message.text)
-        context = f"Студент запитав загальне питання. Ти ПРОГУГЛИВ це і знайшов таке:\n{web_data}\n\nДай коротку і точну відповідь (МАКСИМУМ 1500 символів) на основі цих статей. Якщо інформації там немає, скажи, що не зміг знайти в інтернеті."
+        context = "Студент задав питання. Використовуй інформацію з бази знань (PNU_KNOWLEDGE_BASE), щоб надати точну та коротку відповідь."
 
     user_history[user_id].append({"role": "system", "content": context})
     user_history[user_id].append({"role": "user", "content": message.text})
@@ -185,10 +149,6 @@ async def ai_handler(message: types.Message):
         response = await ai_client.chat.completions.create(model="openai/gpt-oss-120b", messages=user_history[user_id])
         ai_text = response.choices[0].message.content
         user_history[user_id].append({"role": "assistant", "content": ai_text})
-        
-        if len(ai_text) > 4000:
-            ai_text = ai_text[:4000] + "...\n[Відповідь обрізана, оскільки вона занадто довга для Telegram]"
-            
         await wait_msg.edit_text(ai_text)
     except Exception as e:
         await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}")

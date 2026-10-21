@@ -3,4 +3,3 @@ openai
 requests
 beautifulsoup4
 aiohttp
-ddgs
