@@ -36,14 +36,13 @@ def fix_cyrillic_letters(text: str) -> str:
 
 def search_web(query: str) -> str:
     try:
-        search_query = f"{query} Прикарпатський національний університет імені Василя Стефаника"
+        search_query = f"{query} Карпатський національний університет імені Василя Стефаника"
         with DDGS() as ddgs:
             results = list(ddgs.text(search_query, region='ua-uk', max_results=3))
             if not results:
                 return "В інтернеті не знайдено інформації за цим запитом."
             context = "Знайдено в інтернеті:\n\n"
             for r in results:
-                # Обрізаємо текст кожної статті, щоб не перевантажувати контекст ШІ
                 context += f"Джерело: {r['title']}\nТекст: {r['body'][:500]}\n\n"
             return context
     except Exception as e:
@@ -52,36 +51,30 @@ def search_web(query: str) -> str:
 def fetch_group_id_from_site(group_name: str):
     clean_group = fix_cyrillic_letters(group_name.strip().upper())
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
         "Referer": "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
     }
     
-    # ФОРМУЄМО URL ВРУЧНУ, ЩОБ REQUESTS НЕ ЗЛАМАВ КОДУВАННЯ
     query = urllib.parse.quote(clean_group.encode('windows-1251'))
-    search_urls = [
-        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&faculty=0&query={query}",
-        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&lev=142&faculty=0&query={query}",
-        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&query={query}"
-    ]
+    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&lev=142&query={query}"
     
-    for url in search_urls:
-        try:
-            response = requests.get(url, headers=headers, timeout=5, verify=False)
-            response.encoding = 'windows-1251'
-            data = response.json()
-            if "suggestions" in data and "data" in data:
-                for i, suggestion in enumerate(data["suggestions"]):
-                    if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
-                        return data["data"][i]
-                for i, suggestion in enumerate(data["suggestions"]):
-                    if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
-                        return data["data"][i]
-                if data["data"]:
-                    return data["data"][0]
-        except Exception:
-            continue
+    try:
+        response = requests.get(url, headers=headers, timeout=5, verify=False)
+        response.encoding = 'windows-1251'
+        data = response.json()
+        if "suggestions" in data and "data" in data:
+            for i, suggestion in enumerate(data["suggestions"]):
+                if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
+                    return data["data"][i]
+            for i, suggestion in enumerate(data["suggestions"]):
+                if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
+                    return data["data"][i]
+            if data["data"]:
+                return data["data"][0]
+    except Exception:
+        pass
     return None
 
 def fetch_schedule_from_site(group_name: str) -> str:
@@ -96,16 +89,28 @@ def fetch_schedule_from_site(group_name: str) -> str:
     sdate_str = today.strftime("%d.%m.%Y")
     edate_str = end_date.strftime("%d.%m.%Y")
     
-    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
     
+    payload = {
+        "faculty": "0",
+        "course": "0",
+        "group": system_group_id,
+        "sdate": sdate_str,
+        "edate": edate_str,
+        "n": "700"
+    }
+
     time_schedule = {
         "1": "09:00 - 10:20", "2": "10:35 - 11:55", "3": "12:20 - 13:40", "4": "13:50 - 15:10",
         "5": "15:20 - 16:40", "6": "16:50 - 18:10", "7": "18:15 - 19:35", "8": "19:40 - 21:00"
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        response = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
         response.encoding = 'windows-1251'
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
@@ -136,7 +141,7 @@ def fetch_schedule_from_site(group_name: str) -> str:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привіт! Я розумний помічник ПНУ ім. В. Стефаника. Напишіть свою групу для розкладу або задайте будь-яке питання про університет, і я пошукаю це в інтернеті!")
+    await message.answer("Привіт! Я розумний помічник Карпатського національного університету імені Василя Стефаника. Напишіть свою групу для розкладу або задайте будь-яке питання про університет, і я пошукаю це в інтернеті!")
 
 @dp.message()
 async def ai_handler(message: types.Message):
@@ -152,7 +157,7 @@ async def ai_handler(message: types.Message):
             return
     
     if user_id not in user_history:
-        user_history[user_id] = [{"role": "system", "content": "Ти помічник Прикарпатського національного університету (ПНУ). Відповідай правдиво українською."}]
+        user_history[user_id] = [{"role": "system", "content": "Ти помічник Карпатського національного університету імені Василя Стефаника (ПНУ). Відповідай правдиво українською."}]
         
     wait_msg = await message.answer("Шукаю інформацію...")
 
@@ -168,7 +173,6 @@ async def ai_handler(message: types.Message):
             context = "Попроси студента спочатку вказати групу."
     else:
         web_data = search_web(message.text)
-        # ЖОРСТКО ПРОСИМО ШІ БУТИ КОРОТКИМ
         context = f"Студент запитав загальне питання. Ти ПРОГУГЛИВ це і знайшов таке:\n{web_data}\n\nДай коротку і точну відповідь (МАКСИМУМ 1500 символів) на основі цих статей. Якщо інформації там немає, скажи, що не зміг знайти в інтернеті."
 
     user_history[user_id].append({"role": "system", "content": context})
@@ -182,7 +186,6 @@ async def ai_handler(message: types.Message):
         ai_text = response.choices[0].message.content
         user_history[user_id].append({"role": "assistant", "content": ai_text})
         
-        # ЗАХИСТ ВІД ПЕРЕВИЩЕННЯ ЛІМІТУ TELEGRAM (4096 символів)
         if len(ai_text) > 4000:
             ai_text = ai_text[:4000] + "...\n[Відповідь обрізана, оскільки вона занадто довга для Telegram]"
             
