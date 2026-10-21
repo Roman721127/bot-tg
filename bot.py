@@ -1,5 +1,4 @@
 import os
-import urllib.parse
 import asyncio
 import datetime
 import requests
@@ -38,51 +37,74 @@ def fetch_group_id_from_site(group_name: str):
     """Динамічний пошук внутрішнього ID групи по базі всіх факультетів"""
     clean_group = fix_cyrillic_letters(group_name.strip().upper())
     
-    try:
-        encoded_group = clean_group.encode('windows-1251')
-        query = urllib.parse.quote(encoded_group)
-        
-        search_url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&faculty=0&query={query}"
-        
-        response = requests.get(search_url, timeout=5, verify=False)
-        response.encoding = 'windows-1251'
-        data = response.json()
-        
-        if "suggestions" in data and "data" in data:
-            suggestions = data["suggestions"]
-            ids = data["data"]
+    # Додаємо заголовки реального браузера, щоб сервер ПНУ не блокував бота
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
+    }
+    
+    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
+    
+    # 3 варіанти параметрів (сайт ПНУ іноді вимагає різні комбінації для різних факультетів)
+    search_variants = [
+        {"n": "701", "faculty": "0", "query": clean_group.encode('windows-1251')},
+        {"n": "701", "lev": "142", "faculty": "0", "query": clean_group.encode('windows-1251')},
+        {"n": "701", "query": clean_group.encode('windows-1251')}
+    ]
+    
+    for params in search_variants:
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
+            response.encoding = 'windows-1251'
+            data = response.json()
             
-            # 1. Шукаємо ідеальний збіг (наприклад: "КН-42")
-            for i, suggestion in enumerate(suggestions):
-                if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
-                    return ids[i]
-            
-            # 2. Якщо ідеального збігу немає, шукаємо частковий (наприклад: "КН-42(б)" або "КН-42м")
-            for i, suggestion in enumerate(suggestions):
-                if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
-                    return ids[i]
-            
-            # 3. Якщо хоч щось знайшло - беремо перше
-            if ids:
-                return ids[0]
+            if "suggestions" in data and "data" in data:
+                suggestions = data["suggestions"]
+                ids = data["data"]
                 
-    except Exception as e:
-        print(f"Помилка динамічного пошуку групи: {e}")
-        
+                # 1. Шукаємо ідеальний збіг
+                for i, suggestion in enumerate(suggestions):
+                    if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
+                        return ids[i]
+                
+                # 2. Якщо ідеального збігу немає, шукаємо частковий (наприклад: "КН-42м")
+                for i, suggestion in enumerate(suggestions):
+                    if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
+                        return ids[i]
+                
+                # 3. Якщо хоч щось знайшло - беремо перше
+                if ids:
+                    return ids[0]
+        except Exception:
+            continue # Пробуємо наступний варіант параметрів, якщо цей видав помилку
+            
     return None
 
 def fetch_schedule_from_site(group_name: str) -> str:
-    system_group_id = fetch_group_id_from_site(group_name)
+    clean_group = fix_cyrillic_letters(group_name.strip().upper())
+    system_group_id = fetch_group_id_from_site(clean_group)
     
     if not system_group_id:
-        return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ. Перевірте правильність назви (наприклад: КН-42)."
+        return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ.\n\nМожливі причини:\n1. Такої групи дійсно немає в базі університету.\n2. Вона записана з додатковими літерами (наприклад, КН-42м або КН-42(б))."
     
     today = datetime.datetime.now()
     end_date = today + datetime.timedelta(days=14)
     sdate_str = today.strftime("%d.%m.%Y")
     edate_str = end_date.strftime("%d.%m.%Y")
     
-    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
+    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
+    params = {
+        "n": "700",
+        "group": system_group_id,
+        "sdate": sdate_str,
+        "edate": edate_str
+    }
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     
     time_schedule = {
         "1": "09:00 - 10:20",
@@ -96,15 +118,14 @@ def fetch_schedule_from_site(group_name: str) -> str:
     }
     
     try:
-        response = requests.get(url, timeout=10, verify=False)
+        response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
         response.encoding = 'windows-1251'
         
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
         
-        # ДОДАНО ❌, щоб бот не відправляв це в ШІ і ШІ не галюцинував
         if not days_blocks:
-            return f"❌ Не вдалося знайти розклад для {group_name}. Можливо, у цей період пар немає або сайт ПНУ порожній."
+            return f"❌ Розклад для {group_name} порожній. Можливо, у цей період пар немає."
             
         schedule_text = f"Актуальний розклад для {group_name} ({sdate_str} - {edate_str}):\n"
         
@@ -134,7 +155,6 @@ def fetch_schedule_from_site(group_name: str) -> str:
                     
                     para_time = time_schedule.get(para_num, "Час невідомий")
                     content_text = content_cell.get_text(separator=" ", strip=True)
-                    
                     link_info = f" | Посилання: {', '.join(links)}" if links else ""
                     schedule_text += f"Пара {para_num} [{para_time}]: {content_text}{link_info}\n"
                     
@@ -152,7 +172,7 @@ async def ai_handler(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text.lower()
     
-    # РОЗУМНИЙ ПОШУК ГРУПИ В ТЕКСТІ (Оновлений регулярний вираз для груп з літерами, напр. КН-42м)
+    # Витягуємо назву групи з тексту
     match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text)
     if match:
         group_name = fix_cyrillic_letters(match.group(1).upper())
@@ -173,8 +193,7 @@ async def ai_handler(message: types.Message):
                     "Форматуй розклад у вигляді красивого списку з емодзі. "
                     "Виділяй дні тижня жирним шрифтом: **📅 Понеділок (5 жовтня)**. "
                     "Кожну пару форматуй так: '🔹 **[Номер] пара ([Час]):** [Предмет] ([Тип]) — [Викладач] 📍 [Аудиторія]'. "
-                    "Якщо у вхідних даних є слово 'Посилання:', обов'язково роби його клікабельним форматом Markdown: '🔗 [Підключитися до пари](URL)'. "
-                    "Роби порожні рядки (відступи) між різними днями тижня."
+                    "Якщо у вхідних даних є слово 'Посилання:', обов'язково роби його клікабельним форматом Markdown: '🔗 [Підключитися до пари](URL)'."
                 )
             }
         ]
@@ -186,7 +205,7 @@ async def ai_handler(message: types.Message):
             group = user_groups[user_id]
             real_schedule = fetch_schedule_from_site(group)
             
-            # ЖОРСТКЕ БЛОКУВАННЯ ШІ: Якщо розкладу немає (є символ ❌) - виводимо текст і ЗУПИНЯЄМОСЬ!
+            # ЖОРСТКЕ БЛОКУВАННЯ: Якщо є символ ❌ (помилка), виводимо текст і зупиняємо ШІ
             if "❌" in real_schedule:
                 await wait_msg.edit_text(real_schedule)
                 return
