@@ -3,4 +3,4 @@ openai
 requests
 beautifulsoup4
 aiohttp
-duckduckgo-search
+ddgs
