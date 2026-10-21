@@ -24,35 +24,45 @@ ai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Словники для збереження контексту та груп
 user_history = {}
 user_groups = {} 
 
+def fix_cyrillic_letters(text: str) -> str:
+    """Замінює візуально схожі англійські літери на українські (для захисту від помилок вводу)"""
+    eng_chars = "ABCEHKMOPTXIXabcehkmoptxix"
+    ukr_chars = "АВСЕНКМОРТХІХавсенкмортхіх"
+    trans_table = str.maketrans(eng_chars, ukr_chars)
+    return text.translate(trans_table)
+
 def fetch_group_id_from_site(group_name: str):
-    """
-    Робить запит до прихованого API сайту ПНУ для пошуку внутрішнього ID групи.
-    """
+    """Динамічний пошук внутрішнього ID групи по базі всіх факультетів"""
+    clean_group = fix_cyrillic_letters(group_name.strip().upper())
+    
     try:
-        # ВАЖЛИВО: Кодуємо назву у windows-1251 для старого сайту ПНУ
-        encoded_group = group_name.encode('windows-1251')
+        encoded_group = clean_group.encode('windows-1251')
         query = urllib.parse.quote(encoded_group)
         
-        # Прибрали lev=142, щоб шукало по всіх факультетах і рівнях
         search_url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&faculty=0&query={query}"
         
         response = requests.get(search_url, timeout=5, verify=False)
         response.encoding = 'windows-1251'
-        
         data = response.json()
         
         if "suggestions" in data and "data" in data:
             suggestions = data["suggestions"]
             ids = data["data"]
             
+            # 1. Шукаємо ідеальний збіг (наприклад: "КН-42")
             for i, suggestion in enumerate(suggestions):
-                if suggestion.lower().replace(" ", "") == group_name.lower().replace(" ", ""):
+                if suggestion.lower().replace(" ", "") == clean_group.lower().replace(" ", ""):
                     return ids[i]
             
+            # 2. Якщо ідеального збігу немає, шукаємо частковий (наприклад: "КН-42(б)" або "КН-42м")
+            for i, suggestion in enumerate(suggestions):
+                if clean_group.lower().replace(" ", "") in suggestion.lower().replace(" ", ""):
+                    return ids[i]
+            
+            # 3. Якщо хоч щось знайшло - беремо перше
             if ids:
                 return ids[0]
                 
@@ -65,15 +75,7 @@ def fetch_schedule_from_site(group_name: str) -> str:
     system_group_id = fetch_group_id_from_site(group_name)
     
     if not system_group_id:
-        group_ids = {
-            "іпз-42": "-5633",
-            "іпз-41": "-5632", 
-        }
-        search_key = group_name.lower().replace(" ", "")
-        system_group_id = group_ids.get(search_key)
-        
-        if not system_group_id:
-            return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ. Перевірте правильність назви (наприклад: КН-12)."
+        return f"❌ Не вдалося знайти групу '{group_name}' в базі ПНУ. Перевірте правильність назви (наприклад: КН-42)."
     
     today = datetime.datetime.now()
     end_date = today + datetime.timedelta(days=14)
@@ -100,8 +102,9 @@ def fetch_schedule_from_site(group_name: str) -> str:
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
         
+        # ДОДАНО ❌, щоб бот не відправляв це в ШІ і ШІ не галюцинував
         if not days_blocks:
-            return f"Не вдалося знайти розклад для {group_name}. Можливо, у цей період пар немає."
+            return f"❌ Не вдалося знайти розклад для {group_name}. Можливо, у цей період пар немає або сайт ПНУ порожній."
             
         schedule_text = f"Актуальний розклад для {group_name} ({sdate_str} - {edate_str}):\n"
         
@@ -138,24 +141,23 @@ def fetch_schedule_from_site(group_name: str) -> str:
         return schedule_text[:3500] 
         
     except Exception as e:
-        return f"Помилка доступу до бази ПНУ: {e}"
+        return f"❌ Помилка доступу до бази ПНУ: {e}"
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника.\n\nЩоб я міг показувати ваш розклад, напишіть мені свою групу, наприклад:\n**Група ІПЗ-42**\n\n*(Я підтримую будь-які групи та факультети!)*", parse_mode="Markdown")
+    await message.answer("Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника.\n\nЩоб я міг показувати ваш розклад, напишіть мені свою групу, наприклад:\n**КН-42**\n\n*(Я підтримую будь-які групи та факультети!)*", parse_mode="Markdown")
 
 @dp.message()
 async def ai_handler(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text.lower()
     
-    # РОЗУМНИЙ ПОШУК ГРУПИ В ТЕКСТІ (Регулярний вираз)
-    match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2})', user_text)
+    # РОЗУМНИЙ ПОШУК ГРУПИ В ТЕКСТІ (Оновлений регулярний вираз для груп з літерами, напр. КН-42м)
+    match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text)
     if match:
-        group_name = match.group(1).upper()
+        group_name = fix_cyrillic_letters(match.group(1).upper())
         user_groups[user_id] = group_name
         
-        # Якщо студент просто написав групу без слова "розклад", підтверджуємо і зупиняємось
         if "розклад" not in user_text and "пар" not in user_text:
             await message.answer(f"✅ Супер! Я запам'ятав вашу групу: **{group_name}**.\nТепер можете запитати: «Який розклад на завтра?»", parse_mode="Markdown")
             return
@@ -184,7 +186,7 @@ async def ai_handler(message: types.Message):
             group = user_groups[user_id]
             real_schedule = fetch_schedule_from_site(group)
             
-            # Якщо група не знайдена, виводимо помилку ОДРАЗУ, щоб ШІ не заплутався
+            # ЖОРСТКЕ БЛОКУВАННЯ ШІ: Якщо розкладу немає (є символ ❌) - виводимо текст і ЗУПИНЯЄМОСЬ!
             if "❌" in real_schedule:
                 await wait_msg.edit_text(real_schedule)
                 return
@@ -196,7 +198,7 @@ async def ai_handler(message: types.Message):
         else:
             user_history[user_id].append({
                 "role": "system", 
-                "content": "Студент хоче дізнатися розклад, але система ще не знає його групи. Ввічливо попроси його спочатку написати свою групу у форматі 'КН-12'."
+                "content": "Студент хоче дізнатися розклад, але система ще не знає його групи. Ввічливо попроси його спочатку написати свою групу у форматі 'КН-42'."
             })
 
     user_history[user_id].append({"role": "user", "content": message.text})
