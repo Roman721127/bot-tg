@@ -43,7 +43,8 @@ def search_web(query: str) -> str:
                 return "В інтернеті не знайдено інформації за цим запитом."
             context = "Знайдено в інтернеті:\n\n"
             for r in results:
-                context += f"Джерело: {r['title']}\nТекст: {r['body']}\n\n"
+                # Обрізаємо текст кожної статті, щоб не перевантажувати контекст ШІ
+                context += f"Джерело: {r['title']}\nТекст: {r['body'][:500]}\n\n"
             return context
     except Exception as e:
         return f"Помилка вебпошуку: {e}"
@@ -56,15 +57,18 @@ def fetch_group_id_from_site(group_name: str):
         "X-Requested-With": "XMLHttpRequest",
         "Referer": "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
     }
-    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
-    search_variants = [
-        {"n": "701", "faculty": "0", "query": clean_group.encode('windows-1251')},
-        {"n": "701", "lev": "142", "faculty": "0", "query": clean_group.encode('windows-1251')},
-        {"n": "701", "query": clean_group.encode('windows-1251')}
+    
+    # ФОРМУЄМО URL ВРУЧНУ, ЩОБ REQUESTS НЕ ЗЛАМАВ КОДУВАННЯ
+    query = urllib.parse.quote(clean_group.encode('windows-1251'))
+    search_urls = [
+        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&faculty=0&query={query}",
+        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&lev=142&faculty=0&query={query}",
+        f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=701&query={query}"
     ]
-    for params in search_variants:
+    
+    for url in search_urls:
         try:
-            response = requests.get(url, params=params, headers=headers, timeout=5, verify=False)
+            response = requests.get(url, headers=headers, timeout=5, verify=False)
             response.encoding = 'windows-1251'
             data = response.json()
             if "suggestions" in data and "data" in data:
@@ -92,8 +96,7 @@ def fetch_schedule_from_site(group_name: str) -> str:
     sdate_str = today.strftime("%d.%m.%Y")
     edate_str = end_date.strftime("%d.%m.%Y")
     
-    url = "https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi"
-    params = {"n": "700", "group": system_group_id, "sdate": sdate_str, "edate": edate_str}
+    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     time_schedule = {
@@ -102,7 +105,7 @@ def fetch_schedule_from_site(group_name: str) -> str:
     }
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
         response.encoding = 'windows-1251'
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
@@ -165,7 +168,8 @@ async def ai_handler(message: types.Message):
             context = "Попроси студента спочатку вказати групу."
     else:
         web_data = search_web(message.text)
-        context = f"Студент запитав загальне питання. Ти ПРОГУГЛИВ це і знайшов таке:\n{web_data}\n\nДай точну відповідь на основі цих статей. Якщо інформації там немає, скажи, що не зміг знайти в інтернеті."
+        # ЖОРСТКО ПРОСИМО ШІ БУТИ КОРОТКИМ
+        context = f"Студент запитав загальне питання. Ти ПРОГУГЛИВ це і знайшов таке:\n{web_data}\n\nДай коротку і точну відповідь (МАКСИМУМ 1500 символів) на основі цих статей. Якщо інформації там немає, скажи, що не зміг знайти в інтернеті."
 
     user_history[user_id].append({"role": "system", "content": context})
     user_history[user_id].append({"role": "user", "content": message.text})
@@ -177,6 +181,11 @@ async def ai_handler(message: types.Message):
         response = await ai_client.chat.completions.create(model="openai/gpt-oss-120b", messages=user_history[user_id])
         ai_text = response.choices[0].message.content
         user_history[user_id].append({"role": "assistant", "content": ai_text})
+        
+        # ЗАХИСТ ВІД ПЕРЕВИЩЕННЯ ЛІМІТУ TELEGRAM (4096 символів)
+        if len(ai_text) > 4000:
+            ai_text = ai_text[:4000] + "...\n[Відповідь обрізана, оскільки вона занадто довга для Telegram]"
+            
         await wait_msg.edit_text(ai_text)
     except Exception as e:
         await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}")
