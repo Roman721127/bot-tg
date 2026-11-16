@@ -132,27 +132,19 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
     if not system_group_id:
         return f"❌ Групу '{group_name}' не знайдено в моїй базі. Будь ласка, перевірте назву."
     
-    today = datetime.datetime.now()
-    end_date = today + datetime.timedelta(days=days_count)
-    sdate_str = today.strftime("%d.%m.%Y")
-    edate_str = end_date.strftime("%d.%m.%Y")
-    
-    url = f"https://asu-sto.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
+    # Новий формат посилання на статичну сторінку розкладу для групи
+    # system_group_id тепер повинен містити повний шлях, наприклад: "1002/0-5633"
+    url = f"https://asu-sto.pnu.edu.ua/2026-2027-1/static/groups/{system_group_id}/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
-    time_schedule = {
-        "1": "09:00 - 10:20", "2": "10:35 - 11:55", "3": "12:20 - 13:40", "4": "13:50 - 15:10",
-        "5": "15:20 - 16:40", "6": "16:50 - 18:10", "7": "18:15 - 19:35", "8": "19:40 - 21:00"
-    }
     
     try:
         response = requests.get(url, headers=headers, timeout=8, verify=False)
-        response.encoding = 'windows-1251'
+        response.encoding = 'utf-8' # Новий сайт використовує UTF-8 замість windows-1251
         soup = BeautifulSoup(response.text, 'html.parser')
         days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
         
         if not days_blocks:
-            return f"❌ Розклад для {group_name} на цей період порожній."
+            return f"❌ Розклад для {group_name} не знайдено на статичній сторінці сайту."
             
         schedule_text = f"📌 Актуальний розклад для {group_name}:\n"
         for day_block in days_blocks:
@@ -167,10 +159,9 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
                     content_cell = cells[2]
                     if not content_cell.get_text(strip=True): continue
                     links = [a.get('href') for a in content_cell.find_all('a') if a.get('href')]
-                    para_time = time_schedule.get(para_num, "Час невідомий")
                     content_text = content_cell.get_text(separator=" ", strip=True)
                     link_info = f" | Посилання: {', '.join(links)}" if links else ""
-                    schedule_text += f"Пара {para_num} [{para_time}]: {content_text}{link_info}\n"
+                    schedule_text += f"Пара {para_num}: {content_text}{link_info}\n"
                     
         result = schedule_text[:3500]
         
@@ -191,7 +182,7 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
         
         if cached:
             return f"⚠️ Сайт ПНУ наразі недоступний, але ось збережений розклад (оновлено {cached[1]}):\n\n{cached[0]}"
-        return f"❌ Сайт ПНУ недоступний, а в кеші розкладу немає. Помилка: {e}"
+        return f"❌ Помилка завантаження розкладу: {e}"
 
 def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> str:
     if not excluded_electives:
