@@ -2,12 +2,8 @@ import os
 import json
 import asyncio
 import datetime
-import requests
-import urllib3
-import re
 import sqlite3
 import tempfile
-from bs4 import BeautifulSoup
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,8 +12,6 @@ from openai import AsyncOpenAI
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
@@ -36,12 +30,11 @@ PNU_KNOWLEDGE_BASE = """
 1. Офіційна назва: Карпатський національний університет імені Василя Стефаника (ПНУ).
 2. Ректор університету: Валентина Михайлівна Якубів.
 3. Офіційний сайт: https://pnu.edu.ua/
-4. Новий сайт розкладу: https://asu-sto.pnu.edu.ua/2026-2027-1/search-groups.html
-5. Університет знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
-6. Гуманітарний корпус знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
-7. Приймальна комісія знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57. Гуманітарний корпус (ауд. 101)
-8. Педагогічний факультет — вул. С. Бандери, 1.
-9. Факультет туризму — вул. Галицька, 201д.
+4. Університет знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
+5. Гуманітарний корпус знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
+6. Приймальна комісія знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57. Гуманітарний корпус (ауд. 101)
+7. Педагогічний факультет — вул. С. Бандери, 1.
+8. Факультет туризму — вул. Галицька, 201д.
 
 ВАЖЛИВО: НІКОЛИ не використовуй Markdown-таблиці (з символами |).
 Форматуй розклад у вигляді красивого списку з емодзі.
@@ -58,13 +51,6 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             group_name TEXT,
             excluded_electives TEXT DEFAULT '[]'
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS schedule_cache (
-            group_name TEXT PRIMARY KEY,
-            schedule_data TEXT,
-            updated_at TEXT
         )
     """)
     conn.commit()
@@ -112,76 +98,46 @@ def main_keyboard():
         resize_keyboard=True
     )
 
-def load_groups_db() -> dict:
+def load_schedule_file() -> dict:
     try:
-        with open("groups.json", "r", encoding="utf-8") as f:
+        with open("schedule.json", "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
-def fix_cyrillic_letters(text: str) -> str:
-    eng_chars = "ABCEHKMOPTXIXabcehkmoptxix"
-    ukr_chars = "АВСЕНКМОРТХІХавсенкмортхіх"
-    return text.translate(str.maketrans(eng_chars, ukr_chars))
-
-def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
-    clean_group = fix_cyrillic_letters(group_name.strip().upper())
-    groups_db = load_groups_db()
-    system_group_id = groups_db.get(clean_group)
+def fetch_schedule_from_local(group_name: str, days_count: int = 14) -> str:
+    clean_group = group_name.strip().upper()
+    data = load_schedule_file()
+    group_days = data.get(clean_group)
     
-    if not system_group_id:
-        return f"❌ Групу '{group_name}' не знайдено в моїй базі. Перевірте назву у groups.json."
+    if not group_days:
+        return f"❌ Групу '{group_name}' не знайдено в локальній базі розкладу."
     
-    url = f"https://asu-sto.pnu.edu.ua/2026-2027-1/static/groups/{system_group_id}/"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    today = datetime.datetime.now()
+    end_date = today + datetime.timedelta(days=days_count)
     
-    try:
-        response = requests.get(url, headers=headers, timeout=5, verify=False)
-        if response.status_code == 200:
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'html.parser')
-            days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
+    schedule_text = f"📌 Актуальний розклад для {clean_group}:\n"
+    found_any = False
+    
+    for day_item in group_days:
+        date_str = day_item.get("date")
+        day_name = day_item.get("day")
+        try:
+            d_obj = datetime.datetime.strptime(date_str, "%d.%m.%Y")
+            if today.date() <= d_obj.date() <= end_date.date():
+                found_any = True
+                schedule_text += f"\n--- 📅 **{day_name} ({date_str})** ---\n"
+                for p in day_item.get("pairs", []):
+                    link_info = f" 🔗 {p['link']}" if p.get('link') else ""
+                    loc_info = f" 📍 {p['location']}" if p.get('location') else ""
+                    schedule_text += f"🔹 **Пара {p['num']} ({p['time']}):** {p['subject']} — {p['teacher']}{loc_info}{link_info}\n"
+        except Exception:
+            continue
             
-            if days_blocks:
-                schedule_text = f"📌 Актуальний розклад для {clean_group}:\n"
-                for day_block in days_blocks:
-                    date_header = day_block.find('h4')
-                    if not date_header: continue
-                    schedule_text += f"\n--- {date_header.get_text(separator=' ', strip=True)} ---\n"
-                    rows = day_block.find_all('tr')
-                    for row in rows:
-                        cells = row.find_all('td')
-                        if len(cells) >= 3:
-                            para_num = cells[0].get_text(strip=True)
-                            content_cell = cells[2]
-                            if not content_cell.get_text(strip=True): continue
-                            links = [a.get('href') for a in content_cell.find_all('a') if a.get('href')]
-                            content_text = content_cell.get_text(separator=" ", strip=True)
-                            link_info = f" | Посилання: {', '.join(links)}" if links else ""
-                            schedule_text += f"Пара {para_num}: {content_text}{link_info}\n"
-                
-                result = schedule_text[:3500]
-                
-                conn = sqlite3.connect("bot_database.db")
-                cursor = conn.cursor()
-                cursor.execute("INSERT OR REPLACE INTO schedule_cache (group_name, schedule_data, updated_at) VALUES (?, ?, ?)",
-                               (clean_group, result, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-                conn.commit()
-                conn.close()
-                return result
-    except Exception:
-        pass
+    if not found_any:
+        return f"❌ На найближчі дні для групи {clean_group} пар не знайдено."
         
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT schedule_data, updated_at FROM schedule_cache WHERE group_name = ?", (clean_group,))
-    cached = cursor.fetchone()
-    conn.close()
-    
-    if cached:
-        return f"⚠️ Сайт ПНУ не відповідає, але ось збережений розклад з бази (оновлено {cached[1]}):\n\n{cached[0]}"
-        
-    return f"❌ Не вдалося завантажити розклад для групи {clean_group}."
+    return schedule_text[:3500]
 
 def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> str:
     if not excluded_electives:
@@ -239,7 +195,7 @@ async def btn_today_schedule(message: types.Message):
         await message.answer("Будь ласка, спершу вкажіть свою групу.", reply_markup=main_keyboard())
         return
     
-    full_schedule = fetch_schedule_from_site(group, days_count=2)
+    full_schedule = fetch_schedule_from_local(group, days_count=1)
     filtered = filter_schedule_for_user(full_schedule, excluded)
     today_str = datetime.datetime.now().strftime("%d.%m.%Y")
     await message.answer(f"📅 **Розклад на сьогодні ({today_str}):**\n\n{filtered[:3000]}", reply_markup=main_keyboard(), parse_mode="Markdown")
@@ -252,7 +208,7 @@ async def btn_week_schedule(message: types.Message):
         await message.answer("Будь ласка, спершу вкажіть свою групу.", reply_markup=main_keyboard())
         return
     
-    full_schedule = fetch_schedule_from_site(group, days_count=7)
+    full_schedule = fetch_schedule_from_local(group, days_count=7)
     filtered = filter_schedule_for_user(full_schedule, excluded)
     await message.answer(filtered, reply_markup=main_keyboard(), parse_mode="Markdown")
 
@@ -264,7 +220,7 @@ async def btn_custom_day(message: types.Message):
         await message.answer("Спершу оберіть свою групу.", reply_markup=main_keyboard())
         return
     user_states[user_id] = "waiting_for_date"
-    await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `25.11.2026`):", parse_mode="Markdown")
+    await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `17.11.2026`):", parse_mode="Markdown")
 
 @dp.message(F.voice)
 async def voice_handler(message: types.Message):
@@ -300,15 +256,15 @@ async def ai_handler(message: types.Message):
     user_state = user_states.get(user_id)
     
     if user_state == "waiting_for_group":
-        clean_group = fix_cyrillic_letters(user_text.upper())
-        groups_db = load_groups_db()
-        if clean_group in groups_db:
+        clean_group = user_text.upper()
+        data = load_schedule_file()
+        if clean_group in data:
             save_user_group(user_id, clean_group)
             user_states.pop(user_id, None)
             await message.answer(f"✅ Групу **{clean_group}** успішно збережено в базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
         else:
-            await message.answer(f"❌ Групу '{user_text}' не знайдено в довіднику ПНУ. Спробуйте ще раз (наприклад, `ІПЗ-42`).", parse_mode="Markdown")
+            await message.answer(f"❌ Групу '{user_text}' не знайдено в базі розкладу. Спробуйте ще раз (наприклад, `ІПЗ-42`).", parse_mode="Markdown")
             return
 
     if user_state == "waiting_for_electives":
@@ -331,25 +287,34 @@ async def ai_handler(message: types.Message):
         
         match_date = re.search(r'\d{2}\.\d{2}\.\d{4}', user_text)
         if match_date:
-            full_schedule = fetch_schedule_from_site(group, days_count=20)
-            filtered = filter_schedule_for_user(full_schedule, excluded)
             target_date = match_date.group(0)
-            if target_date in filtered:
-                parts = filtered.split(target_date)
-                day_schedule = parts[1].split('---')[0] if len(parts) > 1 else "Інформації на цей день не знайдено."
-                await message.answer(f"📅 **Розклад на {target_date}:**\n{day_schedule}", reply_markup=main_keyboard(), parse_mode="Markdown")
+            data = load_schedule_file()
+            group_days = data.get(group, [])
+            day_found = None
+            for d in group_days:
+                if d.get("date") == target_date:
+                    day_found = d
+                    break
+            if day_found:
+                res = f"📅 **Розклад на {target_date} ({day_found.get('day')}):**\n"
+                for p in day_found.get("pairs", []):
+                    link_info = f" 🔗 {p['link']}" if p.get('link') else ""
+                    loc_info = f" 📍 {p['location']}" if p.get('location') else ""
+                    res += f"🔹 **Пара {p['num']} ({p['time']}):** {p['subject']} — {p['teacher']}{loc_info}{link_info}\n"
+                filtered = filter_schedule_for_user(res, excluded)
+                await message.answer(filtered, reply_markup=main_keyboard(), parse_mode="Markdown")
             else:
                 await message.answer(f"❌ На дату {target_date} розкладу не знайдено або пар немає.", reply_markup=main_keyboard())
         else:
-            await message.answer("❌ Невірний формат дати. Використовуйте ДД.ММ.РРРР (наприклад, 25.11.2026).", reply_markup=main_keyboard())
+            await message.answer("❌ Невірний формат дати. Використовуйте ДД.ММ.РРРР (наприклад, 17.11.2026).", reply_markup=main_keyboard())
         return
 
     match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text.lower())
     if match and not get_user_data(user_id)[0]:
-        group_name = fix_cyrillic_letters(match.group(1).upper())
-        if group_name in load_groups_db():
+        group_name = match.group(1).upper()
+        if group_name in load_schedule_file():
             save_user_group(user_id, group_name)
-            await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
+            await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_Mode="Markdown")
             return
 
     group, excluded = get_user_data(user_id)
@@ -357,12 +322,10 @@ async def ai_handler(message: types.Message):
 
     if "розклад" in user_text.lower() or "пари" in user_text.lower() or "пара" in user_text.lower():
         if group:
-            real_schedule = fetch_schedule_from_site(group)
+            real_schedule = fetch_schedule_from_local(group, days_count=7)
             real_schedule = filter_schedule_for_user(real_schedule, excluded)
-            if "❌" in real_schedule and "⚠️" not in real_schedule:
-                await wait_msg.edit_text(real_schedule)
-                return
-            context = f"Ось розклад для групи {group}:\n{real_schedule}"
+            await wait_msg.edit_text(real_schedule, reply_markup=main_keyboard())
+            return
         else:
             context = "Попроси студента спочатку обрати свою групу за допомогою кнопки «🏫 Обрати/Змінити групу»."
     else:
@@ -381,18 +344,6 @@ async def ai_handler(message: types.Message):
     except Exception as e:
         await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
 
-async def background_schedule_updater():
-    while True:
-        await asyncio.sleep(10)
-        try:
-            groups_db = load_groups_db()
-            for group_name in groups_db.keys():
-                fetch_schedule_from_site(group_name, days_count=14)
-                await asyncio.sleep(2)
-        except Exception:
-            pass
-        await asyncio.sleep(7 * 24 * 60 * 60)
-
 async def handle_ping(request): 
     return web.Response(text="Бот працює!")
 
@@ -404,7 +355,6 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080)))
     await site.start()
     
-    asyncio.create_task(background_schedule_updater())
     await dp.start_polling(bot)
 
 if __name__ == "__main__": 
