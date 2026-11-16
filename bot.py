@@ -27,7 +27,6 @@ ai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Словник для збереження тимчасових станів користувачів (очікування дати чи групи)
 user_states = {}
 
 PNU_KNOWLEDGE_BASE = """
@@ -37,7 +36,7 @@ PNU_KNOWLEDGE_BASE = """
 1. Офіційна назва: Карпатський національний університет імені Василя Стефаника (ПНУ).
 2. Ректор університету: Валентина Михайлівна Якубів.
 3. Офіційний сайт: https://pnu.edu.ua/
-4. Сайт розкладу: https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi
+4. Новий сайт розкладу: https://asu-sto.pnu.edu.ua/2026-2027-1/search-groups.html
 5. Університет знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
 6. Гуманітарний корпус знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57.
 7. Приймальна комісія знаходиться у місті Івано-Франківськ, вулиця Шевченка, 57. Гуманітарний корпус (ауд. 101)
@@ -51,11 +50,9 @@ PNU_KNOWLEDGE_BASE = """
 Відповідай коротко і без вигадок.
 """
 
-# ==================== ІНІЦІАЛІЗАЦІЯ БАЗИ ДАНИХ ====================
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Таблиця користувачів (група та вибіркові дисципліни, які не показувати)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -63,7 +60,6 @@ def init_db():
             excluded_electives TEXT DEFAULT '[]'
         )
     """)
-    # Таблиця кешу розкладу (зберігає останній актуальний розклад для кожної групи)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schedule_cache (
             group_name TEXT PRIMARY KEY,
@@ -106,7 +102,6 @@ def save_user_electives(user_id: int, electives: list):
     conn.commit()
     conn.close()
 
-# ==================== ГОЛОВНЕ МЕНЮ (КНОПКИ) ====================
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -127,10 +122,8 @@ def load_groups_db() -> dict:
 def fix_cyrillic_letters(text: str) -> str:
     eng_chars = "ABCEHKMOPTXIXabcehkmoptxix"
     ukr_chars = "АВСЕНКМОРТХІХавсенкмортхіх"
-    trans_table = str.maketrans(eng_chars, ukr_chars)
-    return text.translate(trans_table)
+    return text.translate(str.maketrans(eng_chars, ukr_chars))
 
-# ==================== ОТРИМАННЯ РОЗКЛАДУ З САЙТУ АБО КЕШУ ====================
 def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
     clean_group = fix_cyrillic_letters(group_name.strip().upper())
     groups_db = load_groups_db()
@@ -144,7 +137,7 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
     sdate_str = today.strftime("%d.%m.%Y")
     edate_str = end_date.strftime("%d.%m.%Y")
     
-    url = f"https://asu-srv.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
+    url = f"https://asu-sto.pnu.edu.ua/cgi-bin/timetable.cgi?n=700&group={system_group_id}&sdate={sdate_str}&edate={edate_str}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     time_schedule = {
@@ -181,7 +174,6 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
                     
         result = schedule_text[:3500]
         
-        # Зберігаємо успішний розклад у локальний кеш бази даних
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO schedule_cache (group_name, schedule_data, updated_at) VALUES (?, ?, ?)",
@@ -191,7 +183,6 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
         
         return result
     except Exception as e:
-        # ЗАХИСТ: Якщо сайт недоступний, беремо з бази даних (кешу)
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("SELECT schedule_data, updated_at FROM schedule_cache WHERE group_name = ?", (clean_group,))
@@ -202,7 +193,6 @@ def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
             return f"⚠️ Сайт ПНУ наразі недоступний, але ось збережений розклад (оновлено {cached[1]}):\n\n{cached[0]}"
         return f"❌ Сайт ПНУ недоступний, а в кеші розкладу немає. Помилка: {e}"
 
-# Фільтрація вибіркових дисциплін
 def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> str:
     if not excluded_electives:
         return schedule_text
@@ -217,8 +207,6 @@ def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> st
         if not skip:
             filtered_lines.append(line)
     return '\n'.join(filtered_lines)
-
-# ==================== ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -263,9 +251,7 @@ async def btn_today_schedule(message: types.Message):
     
     full_schedule = fetch_schedule_from_site(group, days_count=2)
     filtered = filter_schedule_for_user(full_schedule, excluded)
-    
     today_str = datetime.datetime.now().strftime("%d.%m.%Y")
-    # Витягуємо блок лише на сьогоднішню дату
     await message.answer(f"📅 **Розклад на сьогодні ({today_str}):**\n\n{filtered[:3000]}", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "📆 На цей тиждень")
@@ -290,8 +276,6 @@ async def btn_custom_day(message: types.Message):
     user_states[user_id] = "waiting_for_date"
     await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `25.11.2026`):", parse_mode="Markdown")
 
-
-# ==================== ОБРОБКА ГОЛОСОВИХ ПОВІДОМЛЕНЬ (WHISPER) ====================
 @dp.message(F.voice)
 async def voice_handler(message: types.Message):
     wait_msg = await message.answer("🎧 Слухаю та розпізнаю ваше голосове повідомлення...")
@@ -311,8 +295,6 @@ async def voice_handler(message: types.Message):
             )
         user_text = transcript.text
         await wait_msg.edit_text(f"🗣 Ви сказали: _{user_text}_", parse_mode="Markdown")
-        
-        # Передаємо текст із голосу в стандартний обробник повідомлень
         message.text = user_text
         await ai_handler(message)
     except Exception as e:
@@ -321,15 +303,12 @@ async def voice_handler(message: types.Message):
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
 
-
-# ==================== УНІВЕРСАЛЬНИЙ ОБРОБНИК ТЕКСТУ ТА СТАНІВ ====================
 @dp.message()
 async def ai_handler(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text.strip()
     user_state = user_states.get(user_id)
     
-    # 1. Обробка стану введення групи
     if user_state == "waiting_for_group":
         clean_group = fix_cyrillic_letters(user_text.upper())
         groups_db = load_groups_db()
@@ -342,7 +321,6 @@ async def ai_handler(message: types.Message):
             await message.answer(f"❌ Групу '{user_text}' не знайдено в довіднику ПНУ. Спробуйте ще раз (наприклад, `ІПЗ-42`).", parse_mode="Markdown")
             return
 
-    # 2. Обробка стану налаштування вибіркових дисциплін
     if user_state == "waiting_for_electives":
         user_states.pop(user_id, None)
         if user_text.lower() == "очистити":
@@ -354,7 +332,6 @@ async def ai_handler(message: types.Message):
             await message.answer(f"✅ Збережено вибіркові для приховування: {', '.join(electives)}", reply_markup=main_keyboard())
         return
 
-    # 3. Обробка стану введення конкретної дати для розкладу
     if user_state == "waiting_for_date":
         user_states.pop(user_id, None)
         group, excluded = get_user_data(user_id)
@@ -362,15 +339,12 @@ async def ai_handler(message: types.Message):
             await message.answer("Спершу вкажіть свою групу.", reply_markup=main_keyboard())
             return
         
-        # Перевіряємо формат дати
         match_date = re.search(r'\d{2}\.\d{2}\.\d{4}', user_text)
         if match_date:
             full_schedule = fetch_schedule_from_site(group, days_count=20)
             filtered = filter_schedule_for_user(full_schedule, excluded)
-            # Шукаємо в тексті розкладу згадку про конкретну дату
             target_date = match_date.group(0)
             if target_date in filtered:
-                # Вирізаємо потрібний день
                 parts = filtered.split(target_date)
                 day_schedule = parts[1].split('---')[0] if len(parts) > 1 else "Інформації на цей день не знайдено."
                 await message.answer(f"📅 **Розклад на {target_date}:**\n{day_schedule}", reply_markup=main_keyboard(), parse_mode="Markdown")
@@ -380,7 +354,6 @@ async def ai_handler(message: types.Message):
             await message.answer("❌ Невірний формат дати. Використовуйте ДД.ММ.РРРР (наприклад, 25.11.2026).", reply_markup=main_keyboard())
         return
 
-    # Автоматичне виявлення групи у звичайному тексті, якщо група ще не задана
     match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text.lower())
     if match and not get_user_data(user_id)[0]:
         group_name = fix_cyrillic_letters(match.group(1).upper())
@@ -389,7 +362,6 @@ async def ai_handler(message: types.Message):
             await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
 
-    # 4. Обробка звичайних питань через ШІ та Базу Знань
     group, excluded = get_user_data(user_id)
     wait_msg = await message.answer("Шукаю інформацію...")
 
@@ -419,22 +391,16 @@ async def ai_handler(message: types.Message):
     except Exception as e:
         await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
 
-
-# ==================== ФОНОВИЙ ЩОТИЖНЕВИЙ АПДЕЙТ КЕШУ ====================
 async def background_schedule_updater():
-    """Раз на тиждень оновлює кеш розкладу для всіх груп у базі"""
     while True:
-        await asyncio.sleep(10) # Перший запуск невдовзі після старти
+        await asyncio.sleep(10)
         try:
             groups_db = load_groups_db()
             for group_name in groups_db.keys():
                 fetch_schedule_from_site(group_name, days_count=14)
-                await asyncio.sleep(2) # Пауза між запитами на сайт
-            print("🔄 Щотижневий фоновий кеш розкладів оновлено успішно.")
-        except Exception as e:
-            print(f"⚠️ Помилка фонового оновлення розкладу: {e}")
-        
-        # Чекати 7 днів перед наступним оновленням
+                await asyncio.sleep(2)
+        except Exception:
+            pass
         await asyncio.sleep(7 * 24 * 60 * 60)
 
 async def handle_ping(request): 
@@ -448,9 +414,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080)))
     await site.start()
     
-    # Запускаємо фоновий процес оновлення кешу
     asyncio.create_task(background_schedule_updater())
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__": 
