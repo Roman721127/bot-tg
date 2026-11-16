@@ -127,62 +127,73 @@ def fix_cyrillic_letters(text: str) -> str:
 def fetch_schedule_from_site(group_name: str, days_count: int = 14) -> str:
     clean_group = fix_cyrillic_letters(group_name.strip().upper())
     groups_db = load_groups_db()
-    system_group_id = groups_db.get(clean_group)
+    saved_id = groups_db.get(clean_group)
     
-    if not system_group_id:
-        return f"❌ Групу '{group_name}' не знайдено в моїй базі. Будь ласка, перевірте назву."
+    candidate_ids = []
+    if saved_id:
+        candidate_ids.append(saved_id)
     
-    # Новий формат посилання на статичну сторінку розкладу для групи
-    # system_group_id тепер повинен містити повний шлях, наприклад: "1002/0-5633"
-    url = f"https://asu-sto.pnu.edu.ua/2026-2027-1/static/groups/{system_group_id}/"
+    for faculty_id in range(1000, 1020):
+        for group_id_num in range(5000, 5800):
+            generated_path = f"{faculty_id}/0-{group_id_num}"
+            if generated_path not in candidate_ids:
+                candidate_ids.append(generated_path)
+                
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    valid_schedule = None
+    found_path = None
     
-    try:
-        response = requests.get(url, headers=headers, timeout=8, verify=False)
-        response.encoding = 'utf-8' # Новий сайт використовує UTF-8 замість windows-1251
-        soup = BeautifulSoup(response.text, 'html.parser')
-        days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
-        
-        if not days_blocks:
-            return f"❌ Розклад для {group_name} не знайдено на статичній сторінці сайту."
-            
-        schedule_text = f"📌 Актуальний розклад для {group_name}:\n"
-        for day_block in days_blocks:
-            date_header = day_block.find('h4')
-            if not date_header: continue
-            schedule_text += f"\n--- {date_header.get_text(separator=' ', strip=True)} ---\n"
-            rows = day_block.find_all('tr')
-            for row in rows:
-                cells = row.find_all('td')
-                if len(cells) >= 3:
-                    para_num = cells[0].get_text(strip=True)
-                    content_cell = cells[2]
-                    if not content_cell.get_text(strip=True): continue
-                    links = [a.get('href') for a in content_cell.find_all('a') if a.get('href')]
-                    content_text = content_cell.get_text(separator=" ", strip=True)
-                    link_info = f" | Посилання: {', '.join(links)}" if links else ""
-                    schedule_text += f"Пара {para_num}: {content_text}{link_info}\n"
+    for candidate in candidate_ids:
+        url = f"https://asu-sto.pnu.edu.ua/2026-2027-1/static/groups/{candidate}/"
+        try:
+            response = requests.get(url, headers=headers, timeout=3, verify=False)
+            if response.status_code == 200:
+                response.encoding = 'utf-8'
+                soup = BeautifulSoup(response.text, 'html.parser')
+                days_blocks = soup.find_all('div', class_='col-12 col-sm-6')
+                if days_blocks:
+                    schedule_text = f"📌 Актуальний розклад для {clean_group}:\n"
+                    for day_block in days_blocks:
+                        date_header = day_block.find('h4')
+                        if not date_header: continue
+                        schedule_text += f"\n--- {date_header.get_text(separator=' ', strip=True)} ---\n"
+                        rows = day_block.find_all('tr')
+                        for row in rows:
+                            cells = row.find_all('td')
+                            if len(cells) >= 3:
+                                para_num = cells[0].get_text(strip=True)
+                                content_cell = cells[2]
+                                if not content_cell.get_text(strip=True): continue
+                                links = [a.get('href') for a in content_cell.find_all('a') if a.get('href')]
+                                content_text = content_cell.get_text(separator=" ", strip=True)
+                                link_info = f" | Посилання: {', '.join(links)}" if links else ""
+                                schedule_text += f"Пара {para_num}: {content_text}{link_info}\n"
                     
-        result = schedule_text[:3500]
-        
+                    valid_schedule = schedule_text[:3500]
+                    found_path = candidate
+                    break
+        except Exception:
+            continue
+            
+    if valid_schedule and found_path:
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO schedule_cache (group_name, schedule_data, updated_at) VALUES (?, ?, ?)",
-                       (clean_group, result, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-        conn.commit()
+                       (clean_group, valid_schedule, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        cursor.close()
         conn.close()
+        return valid_schedule
         
-        return result
-    except Exception as e:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT schedule_data, updated_at FROM schedule_cache WHERE group_name = ?", (clean_group,))
-        cached = cursor.fetchone()
-        conn.close()
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT schedule_data, updated_at FROM schedule_cache WHERE group_name = ?", (clean_group,))
+    cached = cursor.fetchone()
+    conn.close()
+    
+    if cached:
+        return f"⚠️ Не вдалося знайти нову сторінку на сайті, але ось збережений розклад із бази (оновлено {cached[1]}):\n\n{cached[0]}"
         
-        if cached:
-            return f"⚠️ Сайт ПНУ наразі недоступний, але ось збережений розклад (оновлено {cached[1]}):\n\n{cached[0]}"
-        return f"❌ Помилка завантаження розкладу: {e}"
+    return f"❌ Не вдалося знайти розклад для групи {clean_group} ані на сайті, ані в базі."
 
 def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> str:
     if not excluded_electives:
