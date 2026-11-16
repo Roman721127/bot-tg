@@ -7,7 +7,7 @@ import tempfile
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from openai import AsyncOpenAI
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -91,9 +91,9 @@ def save_user_electives(user_id: int, electives: list):
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📅 На сьогодні"), KeyboardButton(text="📆 На цей тиждень")],
+            [KeyboardButton(text="📅 На сьогодні"), KeyboardButton(text="📆 На этот тиждень")],
             [KeyboardButton(text="🔍 На конкретний день"), KeyboardButton(text="⚙️ Вибір вибіркових")],
-            [KeyboardButton(text="🏫 Обрати/Змінити групу")]
+            [KeyboardButton(text="💬 Написати ШІ"), KeyboardButton(text="🏫 Обрати/Змінити групу")]
         ],
         resize_keyboard=True
     )
@@ -154,9 +154,29 @@ def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> st
             filtered_lines.append(line)
     return '\n'.join(filtered_lines)
 
+def get_group_subjects(group_name: str) -> list:
+    data = load_schedule_file()
+    group_days = data.get(group_name.strip().upper(), [])
+    subjects = set()
+    for day in group_days:
+        for p in day.get("pairs", []):
+            subjects.add(p["subject"])
+    return sorted(list(subjects))
+
+def generate_electives_keyboard(group_name: str, selected: list):
+    subjects = get_group_subjects(group_name)
+    builder = []
+    for subj in subjects:
+        is_selected = subj in selected
+        mark = "✅ " if is_selected else ""
+        builder.append([InlineKeyboardButton(text=f"{mark}{subj}", callback_data=f"toggle_elec:{subj}")])
+    builder.append([InlineKeyboardButton(text="✅ Готово", callback_data="finish_electives")])
+    return InlineKeyboardMarkup(inline_keyboard=builder)
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
+    user_states.pop(user_id, None)
     group, _ = get_user_data(user_id)
     text = "Привіт! Я віртуальний помічник ПНУ ім. В. Стефаника.\n"
     if group:
@@ -170,6 +190,11 @@ async def btn_change_group(message: types.Message):
     user_states[message.from_user.id] = "waiting_for_group"
     await message.answer("Введіть назву вашої академічної групи (наприклад, `ІПЗ-42`):", parse_mode="Markdown")
 
+@dp.message(F.text == "💬 Написати ШІ")
+async def btn_chat_ai(message: types.Message):
+    user_states[message.from_user.id] = "chat_with_ai"
+    await message.answer("💬 Режим розмови з ШІ активовано! Задавайте будь-які запитання про університет.", reply_markup=main_keyboard())
+
 @dp.message(F.text == "⚙️ Вибір вибіркових")
 async def btn_electives(message: types.Message):
     user_id = message.from_user.id
@@ -177,15 +202,48 @@ async def btn_electives(message: types.Message):
     if not group:
         await message.answer("Спершу оберіть свою групу через кнопку «🏫 Обрати/Змінити групу».", reply_markup=main_keyboard())
         return
-    user_states[user_id] = "waiting_for_electives"
-    current_excluded = ", ".join(excluded) if excluded else "немає"
-    await message.answer(
-        f"⚙️ **Управління вибірковими дисциплінами**\n\n"
-        f"Зараз приховані предмети: _{current_excluded}_\n\n"
-        f"Напишіть через кому нові назви вибіркових предметів, які потрібно додати до списку приховування.\n"
-        f"(Або надішліть слово `очистити`, щоб скинути весь фільтр)",
-        parse_mode="Markdown"
-    )
+    user_states[user_id] = {"state": "selecting_electives", "selected": list(excluded)}
+    kb = generate_electives_keyboard(group, excluded)
+    await message.answer("⚙️ Оберіть предмети, які потрібно приховати з розкладу, і натисніть «✅ Готово»:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("toggle_elec:"))
+async def callback_toggle_elec(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    subject = callback.data.split(":", 1)[1]
+    user_state = user_states.get(user_id)
+    if not isinstance(user_state, dict) or user_state.get("state") != "selecting_electives":
+        await callback.answer("Сесія закінчилася. Натисніть кнопку вибіркових знову.")
+        return
+    
+    selected = user_state["selected"]
+    if subject in selected:
+        selected.remove(subject)
+    else:
+        selected.append(subject)
+        
+    group, _ = get_user_data(user_id)
+    kb = generate_electives_keyboard(group, selected)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
+
+@dp.callback_query(F.data == "finish_electives")
+async def callback_finish_electives(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user_state = user_states.get(user_id)
+    if not isinstance(user_state, dict) or user_state.get("state") != "selecting_electives":
+        await callback.answer("Сесія закінчилася.")
+        return
+    
+    selected = user_state["selected"]
+    save_user_electives(user_id, selected)
+    user_states.pop(user_id, None)
+    
+    ex_text = ", ".join(selected) if selected else "немає"
+    await callback.message.edit_text(f"✅ Збережено приховані вибіркові предмети: _{ex_text}_", parse_mode="Markdown")
+    await callback.answer()
 
 @dp.message(F.text == "📅 На сьогодні")
 async def btn_today_schedule(message: types.Message):
@@ -267,19 +325,6 @@ async def ai_handler(message: types.Message):
             await message.answer(f"❌ Групу '{user_text}' не знайдено в базі розкладу. Спробуйте ще раз (наприклад, `ІПЗ-42`).", parse_mode="Markdown")
             return
 
-    if user_state == "waiting_for_electives":
-        user_states.pop(user_id, None)
-        _, current_excluded = get_user_data(user_id)
-        if user_text.lower() == "очистити":
-            save_user_electives(user_id, [])
-            await message.answer("✅ Список вибіркових очищено. Тепер показуватимуться всі предмети.", reply_markup=main_keyboard())
-        else:
-            new_electives = [item.strip() for item in user_text.split(",") if item.strip()]
-            updated_electives = list(set(current_excluded + new_electives))
-            save_user_electives(user_id, updated_electives)
-            await message.answer(f"✅ Оновлено список вибіркових для приховування: {', '.join(updated_electives)}", reply_markup=main_keyboard())
-        return
-
     if user_state == "waiting_for_date":
         user_states.pop(user_id, None)
         group, excluded = get_user_data(user_id)
@@ -319,17 +364,10 @@ async def ai_handler(message: types.Message):
             await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
 
-    group, excluded = get_user_data(user_id)
     wait_msg = await message.answer("Шукаю інформацію...")
-
-    if "розклад" in user_text.lower() or "пари" in user_text.lower() or "пара" in user_text.lower():
-        if group:
-            real_schedule = fetch_schedule_from_local(group, days_count=7)
-            real_schedule = filter_schedule_for_user(real_schedule, excluded)
-            await wait_msg.edit_text(real_schedule, reply_markup=main_keyboard())
-            return
-        else:
-            context = "Попроси студента спочатку обрати свою групу за допомогою кнопки «🏫 Обрати/Змінити групу»."
+    
+    if user_state == "chat_with_ai":
+        context = f"Студент питає: '{user_text}'. Використовуй інформацію з бази знань (PNU_KNOWLEDGE_BASE), щоб надати точну відповідь."
     else:
         context = f"Студент питає: '{user_text}'. Використовуй інформацію з бази знань (PNU_KNOWLEDGE_BASE), щоб надати точну відповідь."
 
