@@ -147,7 +147,7 @@ def filter_schedule_for_user(schedule_text: str, excluded_electives: list) -> st
     for line in lines:
         skip = False
         for elective in excluded_electives:
-            if elective.lower() in line.lower():
+            if elective.strip().lower() in line.lower():
                 skip = True
                 break
         if not skip:
@@ -182,8 +182,8 @@ async def btn_electives(message: types.Message):
     await message.answer(
         f"⚙️ **Управління вибірковими дисциплінами**\n\n"
         f"Зараз приховані предмети: _{current_excluded}_\n\n"
-        f"Напишіть через кому назви вибіркових предметів, які ви **не обирали** і які не потрібно вам показувати у розкладі.\n"
-        f"(Або надішліть слово `очистити`, щоб скинути фільтр)",
+        f"Напишіть через кому нові назви вибіркових предметів, які потрібно додати до списку приховування.\n"
+        f"(Або надішліть слово `очистити`, щоб скинути весь фільтр)",
         parse_mode="Markdown"
     )
 
@@ -269,13 +269,15 @@ async def ai_handler(message: types.Message):
 
     if user_state == "waiting_for_electives":
         user_states.pop(user_id, None)
+        _, current_excluded = get_user_data(user_id)
         if user_text.lower() == "очистити":
             save_user_electives(user_id, [])
             await message.answer("✅ Список вибіркових очищено. Тепер показуватимуться всі предмети.", reply_markup=main_keyboard())
         else:
-            electives = [item.strip() for item in user_text.split(",") if item.strip()]
-            save_user_electives(user_id, electives)
-            await message.answer(f"✅ Збережено вибіркові для приховування: {', '.join(electives)}", reply_markup=main_keyboard())
+            new_electives = [item.strip() for item in user_text.split(",") if item.strip()]
+            updated_electives = list(set(current_excluded + new_electives))
+            save_user_electives(user_id, updated_electives)
+            await message.answer(f"✅ Оновлено список вибіркових для приховування: {', '.join(updated_electives)}", reply_markup=main_keyboard())
         return
 
     if user_state == "waiting_for_date":
@@ -314,7 +316,7 @@ async def ai_handler(message: types.Message):
         group_name = match.group(1).upper()
         if group_name in load_schedule_file():
             save_user_group(user_id, group_name)
-            await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_Mode="Markdown")
+            await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
 
     group, excluded = get_user_data(user_id)
