@@ -391,7 +391,7 @@ async def ai_handler(message: types.Message):
         wait_msg = await message.answer("Думаю над відповіддю...")
         try:
             response = await ai_client.chat.completions.create(
-                model="llama-3.1-8b-instant",  # Актуальна та стабільна модель Groq
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": PNU_KNOWLEDGE_BASE},
                     {"role": "user", "content": user_text}
