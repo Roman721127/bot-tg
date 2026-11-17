@@ -239,11 +239,11 @@ async def btn_week_schedule(message: types.Message):
 @dp.message(F.text == "🔍 На конкретний день")
 async def btn_custom_day(message: types.Message):
     user_id = message.from_user.id
-    user_states[user_id] = "waiting_for_date"
     group, _ = get_user_data(user_id)
     if not group:
         await message.answer("Спершу оберіть свою групу.", reply_markup=main_keyboard())
         return
+    user_states[user_id] = "waiting_for_date"
     await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `17.11.2026`):", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.voice)
@@ -302,7 +302,6 @@ async def ai_handler(message: types.Message):
             await message.answer(f"✅ Збережено приховані вибіркові предмети: _{ex_text}_", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
         
-        subject_name = ""
         if user_text.startswith("❌ Приховати: "):
             subject_name = user_text.replace("❌ Приховати: ", "").strip()
             if subject_name in selected:
@@ -347,28 +346,25 @@ async def ai_handler(message: types.Message):
             await message.answer("❌ Невірний формат дати. Використовуйте ДД.ММ.РРРР (наприклад, 17.11.2026).", reply_markup=main_keyboard())
         return
 
-    match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text.lower())
-    if match and not get_user_data(user_id)[0] and user_state != "chat_with_ai":
-        group_name = match.group(1).upper()
-        if group_name in load_schedule_file():
-            save_user_group(user_id, group_name)
-            await message.answer(f"✅ Групу **{group_name}** збережено у базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
-            return
+    # Якщо активовано режим спілкування з ШІ
+    if user_state == "chat_with_ai":
+        wait_msg = await message.answer("Думаю над відповіддю...")
+        try:
+            response = await ai_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": PNU_KNOWLEDGE_BASE},
+                    {"role": "user", "content": user_text}
+                ]
+            )
+            ai_text = response.choices[0].message.content
+            await wait_msg.edit_text(ai_text, reply_markup=main_keyboard())
+        except Exception as e:
+            await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
+        return
 
-    wait_msg = await message.answer("Шукаю інформацію...")
-    
-    try:
-        response = await ai_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": PNU_KNOWLEDGE_BASE},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        ai_text = response.choices[0].message.content
-        await wait_msg.edit_text(ai_text, reply_markup=main_keyboard())
-    except Exception as e:
-        await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
+    # За замовчуванням, якщо жоден стан не вибрано, а користувач просто пише текст
+    await message.answer("Використовуйте кнопки нижче або натисніть «💬 Написати ШІ», щоб поспілкуватися з асистентом.", reply_markup=main_keyboard())
 
 async def handle_ping(request): 
     return web.Response(text="Бот працює!")
