@@ -5,6 +5,7 @@ import datetime
 import sqlite3
 import tempfile
 import re
+import traceback
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -361,10 +362,11 @@ async def ai_handler(message: types.Message):
             ai_text = response.choices[0].message.content
             await wait_msg.edit_text(ai_text, reply_markup=main_keyboard())
         except Exception as e:
+            traceback.print_exc()
             await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
         return
 
-    # За замовчуванням, якщо жоден стан не вибрано, а користувач просто пише текст
+    # За замовчуванням, якщо жоден стан не вибрано
     await message.answer("Використовуйте кнопки нижче або натисніть «💬 Написати ШІ», щоб поспілкуватися з асистентом.", reply_markup=main_keyboard())
 
 async def handle_ping(request): 
