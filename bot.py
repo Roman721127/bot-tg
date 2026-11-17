@@ -11,6 +11,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from openai import AsyncOpenAI
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -175,6 +176,43 @@ def generate_electives_keyboard(group_name: str, selected: list):
             keyboard_rows.append([KeyboardButton(text=f"✅ Показувати: {subj}")])
     keyboard_rows.append([KeyboardButton(text="✅ Готово")])
     return ReplyKeyboardMarkup(keyboard=keyboard_rows, resize_keyboard=True)
+
+# Функція щоденної вечірньої розсилки розкладу на завтра о 21:00
+async def send_evening_schedule_broadcast():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, group_name, excluded_electives FROM users WHERE group_name IS NOT NULL")
+    users = cursor.fetchall()
+    conn.close()
+
+    if not users:
+        return
+
+    tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
+    target_date = tomorrow.strftime("%d.%m.%Y")
+    data = load_schedule_file()
+
+    for user_id, group_name, excluded_json in users:
+        try:
+            excluded = json.loads(excluded_json) if excluded_json else []
+            group_days = data.get(group_name.strip().upper(), [])
+            day_found = None
+            for d in group_days:
+                if d.get("date") == target_date:
+                    day_found = d
+                    break
+            
+            if day_found:
+                res = f"🌙 **Вечірнє нагадування: розклад на завтра ({target_date}, {day_found.get('day')}):**\n"
+                for p in day_found.get("pairs", []):
+                    link_info = f" 🔗 {p['link']}" if p.get('link') else ""
+                    loc_info = f" 📍 {p['location']}" if p.get('location') else ""
+                    res += f"🔹 **Пара {p['num']} ({p['time']}):** {p['subject']} — {p['teacher']}{loc_info}{link_info}\n"
+                
+                filtered = filter_schedule_for_user(res, excluded)
+                await bot.send_message(user_id, filtered, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Помилка розсилки для користувача {user_id}: {e}")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -353,17 +391,17 @@ async def ai_handler(message: types.Message):
         wait_msg = await message.answer("Думаю над відповіддю...")
         try:
             response = await ai_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",  # Актуальна та стабільна модель Groq
                 messages=[
                     {"role": "system", "content": PNU_KNOWLEDGE_BASE},
                     {"role": "user", "content": user_text}
                 ]
             )
             ai_text = response.choices[0].message.content
-            await wait_msg.edit_text(ai_text, reply_markup=main_keyboard())
+            await wait_msg.edit_text(ai_text)
         except Exception as e:
             traceback.print_exc()
-            await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}", reply_markup=main_keyboard())
+            await wait_msg.edit_text(f"Помилка зв'язку з ШІ: {e}")
         return
 
     # За замовчуванням, якщо жоден стан не вибрано
@@ -373,6 +411,11 @@ async def handle_ping(request):
     return web.Response(text="Бот працює!")
 
 async def main():
+    # Налаштування фонового планувальника для розсилки о 21:00 щодня
+    scheduler = AsyncIOScheduler(timezone="Europe/Kiev")
+    scheduler.add_job(send_evening_schedule_broadcast, "cron", hour=21, minute=0)
+    scheduler.start()
+
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
