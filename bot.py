@@ -91,7 +91,7 @@ def save_user_electives(user_id: int, electives: list):
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📅 На сьогодні"), KeyboardButton(text="📆 На этот тиждень")],
+            [KeyboardButton(text="📅 На сьогодні"), KeyboardButton(text="📆 На цей тиждень")],
             [KeyboardButton(text="🔍 На конкретний день"), KeyboardButton(text="⚙️ Вибір вибіркових")],
             [KeyboardButton(text="💬 Написати ШІ"), KeyboardButton(text="🏫 Обрати/Змінити групу")]
         ],
@@ -187,17 +187,20 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text == "🏫 Обрати/Змінити групу")
 async def btn_change_group(message: types.Message):
-    user_states[message.from_user.id] = "waiting_for_group"
-    await message.answer("Введіть назву вашої академічної групи (наприклад, `ІПЗ-42`):", parse_mode="Markdown")
+    user_id = message.from_user.id
+    user_states[user_id] = "waiting_for_group"
+    await message.answer("Введіть назву вашої академічної групи (наприклад, `ІПЗ-42`):", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "💬 Написати ШІ")
 async def btn_chat_ai(message: types.Message):
-    user_states[message.from_user.id] = "chat_with_ai"
+    user_id = message.from_user.id
+    user_states[user_id] = "chat_with_ai"
     await message.answer("💬 Режим розмови з ШІ активовано! Задавайте будь-які запитання про університет.", reply_markup=main_keyboard())
 
 @dp.message(F.text == "⚙️ Вибір вибіркових")
 async def btn_electives(message: types.Message):
     user_id = message.from_user.id
+    user_states.pop(user_id, None)
     group, excluded = get_user_data(user_id)
     if not group:
         await message.answer("Спершу оберіть свою групу через кнопку «🏫 Обрати/Змінити групу».", reply_markup=main_keyboard())
@@ -248,6 +251,7 @@ async def callback_finish_electives(callback: types.CallbackQuery):
 @dp.message(F.text == "📅 На сьогодні")
 async def btn_today_schedule(message: types.Message):
     user_id = message.from_user.id
+    user_states.pop(user_id, None)
     group, excluded = get_user_data(user_id)
     if not group:
         await message.answer("Будь ласка, спершу вкажіть свою групу.", reply_markup=main_keyboard())
@@ -261,6 +265,7 @@ async def btn_today_schedule(message: types.Message):
 @dp.message(F.text == "📆 На цей тиждень")
 async def btn_week_schedule(message: types.Message):
     user_id = message.from_user.id
+    user_states.pop(user_id, None)
     group, excluded = get_user_data(user_id)
     if not group:
         await message.answer("Будь ласка, спершу вкажіть свою групу.", reply_markup=main_keyboard())
@@ -273,12 +278,13 @@ async def btn_week_schedule(message: types.Message):
 @dp.message(F.text == "🔍 На конкретний день")
 async def btn_custom_day(message: types.Message):
     user_id = message.from_user.id
+    user_states.pop(user_id, None)
     group, _ = get_user_data(user_id)
     if not group:
         await message.answer("Спершу оберіть свою групу.", reply_markup=main_keyboard())
         return
     user_states[user_id] = "waiting_for_date"
-    await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `17.11.2026`):", parse_mode="Markdown")
+    await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `17.11.2026`):", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.voice)
 async def voice_handler(message: types.Message):
@@ -322,7 +328,7 @@ async def ai_handler(message: types.Message):
             await message.answer(f"✅ Групу **{clean_group}** успішно збережено в базі даних!", reply_markup=main_keyboard(), parse_mode="Markdown")
             return
         else:
-            await message.answer(f"❌ Групу '{user_text}' не знайдено в базі розкладу. Спробуйте ще раз (наприклад, `ІПЗ-42`).", parse_mode="Markdown")
+            await message.answer(f"❌ Групу '{user_text}' не знайдено в базі розкладу. Спробуйте ще раз (наприклад, `ІПЗ-42`).", reply_markup=main_keyboard())
             return
 
     if user_state == "waiting_for_date":
@@ -357,7 +363,7 @@ async def ai_handler(message: types.Message):
         return
 
     match = re.search(r'([а-яїієґa-z]{2,}-\d{1,2}[а-яїієґa-z]*)', user_text.lower())
-    if match and not get_user_data(user_id)[0]:
+    if match and not get_user_data(user_id)[0] and user_state != "chat_with_ai":
         group_name = match.group(1).upper()
         if group_name in load_schedule_file():
             save_user_group(user_id, group_name)
@@ -366,17 +372,12 @@ async def ai_handler(message: types.Message):
 
     wait_msg = await message.answer("Шукаю інформацію...")
     
-    if user_state == "chat_with_ai":
-        context = f"Студент питає: '{user_text}'. Використовуй інформацію з бази знань (PNU_KNOWLEDGE_BASE), щоб надати точну відповідь."
-    else:
-        context = f"Студент питає: '{user_text}'. Використовуй інформацію з бази знань (PNU_KNOWLEDGE_BASE), щоб надати точну відповідь."
-
     try:
         response = await ai_client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": PNU_KNOWLEDGE_BASE},
-                {"role": "user", "content": context}
+                {"role": "user", "content": user_text}
             ]
         )
         ai_text = response.choices[0].message.content
