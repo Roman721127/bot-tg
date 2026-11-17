@@ -7,7 +7,7 @@ import tempfile
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from openai import AsyncOpenAI
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -165,13 +165,14 @@ def get_group_subjects(group_name: str) -> list:
 
 def generate_electives_keyboard(group_name: str, selected: list):
     subjects = get_group_subjects(group_name)
-    builder = []
+    keyboard_rows = []
     for subj in subjects:
-        is_selected = subj in selected
-        mark = "✅ " if is_selected else ""
-        builder.append([InlineKeyboardButton(text=f"{mark}{subj}", callback_data=f"toggle_elec:{subj}")])
-    builder.append([InlineKeyboardButton(text="✅ Готово", callback_data="finish_electives")])
-    return InlineKeyboardMarkup(inline_keyboard=builder)
+        if subj in selected:
+            keyboard_rows.append([KeyboardButton(text=f"❌ Приховати: {subj}")])
+        else:
+            keyboard_rows.append([KeyboardButton(text=f"✅ Показувати: {subj}")])
+    keyboard_rows.append([KeyboardButton(text="✅ Готово")])
+    return ReplyKeyboardMarkup(keyboard=keyboard_rows, resize_keyboard=True)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -200,53 +201,13 @@ async def btn_chat_ai(message: types.Message):
 @dp.message(F.text == "⚙️ Вибір вибіркових")
 async def btn_electives(message: types.Message):
     user_id = message.from_user.id
-    user_states.pop(user_id, None)
     group, excluded = get_user_data(user_id)
     if not group:
         await message.answer("Спершу оберіть свою групу через кнопку «🏫 Обрати/Змінити групу».", reply_markup=main_keyboard())
         return
     user_states[user_id] = {"state": "selecting_electives", "selected": list(excluded)}
     kb = generate_electives_keyboard(group, excluded)
-    await message.answer("⚙️ Оберіть предмети, які потрібно приховати з розкладу, і натисніть «✅ Готово»:", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("toggle_elec:"))
-async def callback_toggle_elec(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    subject = callback.data.split(":", 1)[1]
-    user_state = user_states.get(user_id)
-    if not isinstance(user_state, dict) or user_state.get("state") != "selecting_electives":
-        await callback.answer("Сесія закінчилася. Натисніть кнопку вибіркових знову.")
-        return
-    
-    selected = user_state["selected"]
-    if subject in selected:
-        selected.remove(subject)
-    else:
-        selected.append(subject)
-        
-    group, _ = get_user_data(user_id)
-    kb = generate_electives_keyboard(group, selected)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
-    await callback.answer()
-
-@dp.callback_query(F.data == "finish_electives")
-async def callback_finish_electives(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_state = user_states.get(user_id)
-    if not isinstance(user_state, dict) or user_state.get("state") != "selecting_electives":
-        await callback.answer("Сесія закінчилася.")
-        return
-    
-    selected = user_state["selected"]
-    save_user_electives(user_id, selected)
-    user_states.pop(user_id, None)
-    
-    ex_text = ", ".join(selected) if selected else "немає"
-    await callback.message.edit_text(f"✅ Збережено приховані вибіркові предмети: _{ex_text}_", parse_mode="Markdown")
-    await callback.answer()
+    await message.answer("⚙️ Натискайте на предмети нижче, щоб змінити їх статус (приховати/показувати). Після завершення натисніть «✅ Готово»:", reply_markup=kb)
 
 @dp.message(F.text == "📅 На сьогодні")
 async def btn_today_schedule(message: types.Message):
@@ -278,12 +239,11 @@ async def btn_week_schedule(message: types.Message):
 @dp.message(F.text == "🔍 На конкретний день")
 async def btn_custom_day(message: types.Message):
     user_id = message.from_user.id
-    user_states.pop(user_id, None)
+    user_states[user_id] = "waiting_for_date"
     group, _ = get_user_data(user_id)
     if not group:
         await message.answer("Спершу оберіть свою групу.", reply_markup=main_keyboard())
         return
-    user_states[user_id] = "waiting_for_date"
     await message.answer("Введіть бажану дату у форматі ДД.ММ.РРРР (наприклад, `17.11.2026`):", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.voice)
@@ -331,6 +291,31 @@ async def ai_handler(message: types.Message):
             await message.answer(f"❌ Групу '{user_text}' не знайдено в базі розкладу. Спробуйте ще раз (наприклад, `ІПЗ-42`).", reply_markup=main_keyboard())
             return
 
+    if isinstance(user_state, dict) and user_state.get("state") == "selecting_electives":
+        group, _ = get_user_data(user_id)
+        selected = user_state["selected"]
+        
+        if user_text == "✅ Готово":
+            save_user_electives(user_id, selected)
+            user_states.pop(user_id, None)
+            ex_text = ", ".join(selected) if selected else "немає"
+            await message.answer(f"✅ Збережено приховані вибіркові предмети: _{ex_text}_", reply_markup=main_keyboard(), parse_mode="Markdown")
+            return
+        
+        subject_name = ""
+        if user_text.startswith("❌ Приховати: "):
+            subject_name = user_text.replace("❌ Приховати: ", "").strip()
+            if subject_name in selected:
+                selected.remove(subject_name)
+        elif user_text.startswith("✅ Показувати: "):
+            subject_name = user_text.replace("✅ Показувати: ", "").strip()
+            if subject_name not in selected:
+                selected.append(subject_name)
+                
+        kb = generate_electives_keyboard(group, selected)
+        await message.answer("Оновлено вибір. Натисніть інші предмети або «✅ Готово»:", reply_markup=kb)
+        return
+
     if user_state == "waiting_for_date":
         user_states.pop(user_id, None)
         group, excluded = get_user_data(user_id)
@@ -374,7 +359,7 @@ async def ai_handler(message: types.Message):
     
     try:
         response = await ai_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": PNU_KNOWLEDGE_BASE},
                 {"role": "user", "content": user_text}
